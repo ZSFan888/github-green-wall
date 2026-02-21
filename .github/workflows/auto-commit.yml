@@ -1,15 +1,52 @@
 name: Auto Green Wall
 
 on:
-  schedule:
-    # 每天 UTC 10:00 (北京时间 18:00) 自动运行
-    - cron: '0 10 * * *'
-  workflow_dispatch:  # 允许手动触发
+  workflow_dispatch:
     inputs:
-      intensity:
-        description: '每天提交次数 (1-10)'
+      mode:
+        description: 'pixel | today | range | random'
+        required: true
+        default: 'pixel'
+        type: choice
+        options: [pixel, today, range, random]
+      base_sunday:
+        description: 'Pixel mode: base Sunday (YYYY-MM-DD)'
+        required: false
+        default: ''
+        type: string
+      grid_json:
+        description: 'Pixel mode: 52x7 JSON array (columns x rows)'
+        required: false
+        default: ''
+        type: string
+      intensity_cap:
+        description: 'Pixel/Range cap (1-10). Pixel UI uses 0-4 mapped by cap'
         required: false
         default: '4'
+        type: string
+      start:
+        description: 'Range/Random start date (YYYY-MM-DD)'
+        required: false
+        default: ''
+        type: string
+      end:
+        description: 'Range/Random end date (YYYY-MM-DD)'
+        required: false
+        default: ''
+        type: string
+      random_max:
+        description: 'Random mode: 0-10 commits per day max'
+        required: false
+        default: '4'
+        type: string
+      skip_weekends:
+        description: 'true/false'
+        required: false
+        default: 'false'
+        type: string
+
+permissions:
+  contents: write
 
 jobs:
   commit:
@@ -18,7 +55,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0
 
       - name: Setup Git
@@ -26,15 +62,100 @@ jobs:
           git config user.name "${{ github.actor }}"
           git config user.email "${{ github.actor }}@users.noreply.github.com"
 
-      - name: Make commits
+      - name: Generate commits
+        env:
+          MODE: ${{ inputs.mode }}
+          BASE_SUNDAY: ${{ inputs.base_sunday }}
+          GRID_JSON: ${{ inputs.grid_json }}
+          INTENSITY_CAP: ${{ inputs.intensity_cap }}
+          START: ${{ inputs.start }}
+          END: ${{ inputs.end }}
+          RANDOM_MAX: ${{ inputs.random_max }}
+          SKIP_WEEKENDS: ${{ inputs.skip_weekends }}
         run: |
-          INTENSITY=${{ github.event.inputs.intensity || '4' }}
-          for i in $(seq 1 $INTENSITY); do
-            echo "$(date '+%Y-%m-%d %H:%M:%S') - auto commit #$i" >> contributions.txt
-            git add contributions.txt
-            git commit -m "auto: $(date '+%Y-%m-%d') commit #$i"
-            sleep 2
-          done
+          python3 - << 'PY'
+          import os, json, random
+          from datetime import datetime, timedelta
+
+          mode = os.getenv('MODE','pixel')
+          base_sunday = os.getenv('BASE_SUNDAY','')
+          grid_json = os.getenv('GRID_JSON','')
+          intensity_cap = int(os.getenv('INTENSITY_CAP','4') or '4')
+          start = os.getenv('START','')
+          end = os.getenv('END','')
+          random_max = int(os.getenv('RANDOM_MAX','4') or '4')
+          skip_weekends = (os.getenv('SKIP_WEEKENDS','false').lower() == 'true')
+
+          def run(cmd, env=None):
+            import subprocess
+            r = subprocess.run(cmd, shell=True, env=env)
+            if r.returncode != 0:
+              raise SystemExit(r.returncode)
+
+          def commit_at(dt, msg):
+            path = 'contributions.txt'
+            with open(path, 'a', encoding='utf-8') as f:
+              f.write(f"{dt.isoformat()} | {msg}\n")
+            env = os.environ.copy()
+            ds = dt.strftime('%Y-%m-%d %H:%M:%S')
+            env['GIT_AUTHOR_DATE'] = ds
+            env['GIT_COMMITTER_DATE'] = ds
+            run('git add contributions.txt', env)
+            run(f'git commit -m "{msg}"', env)
+
+          def daterange(a,b):
+            d=a
+            while d<=b:
+              yield d
+              d+=timedelta(days=1)
+
+          now = datetime.now()
+
+          if mode == 'today':
+            d = now.replace(hour=10, minute=0, second=0, microsecond=0)
+            for i in range(max(1,intensity_cap)):
+              commit_at(d + timedelta(minutes=i), f"today: {d.date()} #{i+1}")
+
+          elif mode in ('range','random'):
+            if not start or not end:
+              raise SystemExit('start/end required for range/random')
+            a = datetime.strptime(start, '%Y-%m-%d')
+            b = datetime.strptime(end, '%Y-%m-%d')
+            for day in daterange(a,b):
+              if skip_weekends and day.weekday() >= 5:
+                continue
+              if mode == 'range':
+                n = max(0, intensity_cap)
+              else:
+                n = random.randint(0, max(0, random_max))
+              for i in range(n):
+                dt = day.replace(hour=9 + (i % 8), minute=(i*7)%60, second=0)
+                commit_at(dt, f"{mode}: {day.date()} #{i+1}")
+
+          elif mode == 'pixel':
+            if not base_sunday:
+              raise SystemExit('base_sunday required for pixel mode')
+            if not grid_json:
+              raise SystemExit('grid_json required for pixel mode')
+            base = datetime.strptime(base_sunday, '%Y-%m-%d')
+            grid = json.loads(grid_json)
+            cols = len(grid)
+            for x in range(cols):
+              col = grid[x]
+              for y in range(min(7, len(col))):
+                level = int(col[y])
+                n = min(intensity_cap, max(0, level))
+                if n <= 0:
+                  continue
+                day = base + timedelta(days=x*7 + y)
+                for i in range(n):
+                  dt = day.replace(hour=9 + (i % 8), minute=(i*11)%60, second=0)
+                  commit_at(dt, f"pixel: {day.date()} x{x}y{y} lvl{level} #{i+1}")
+          else:
+            raise SystemExit('unknown mode')
+
+          print('done')
+          PY
 
       - name: Push
         run: git push origin main
