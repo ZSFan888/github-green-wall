@@ -1,0 +1,40 @@
+name: Auto Green Wall
+
+on:
+  schedule:
+    # 每天 UTC 10:00 (北京时间 18:00) 自动运行
+    - cron: '0 10 * * *'
+  workflow_dispatch:  # 允许手动触发
+    inputs:
+      intensity:
+        description: '每天提交次数 (1-10)'
+        required: false
+        default: '4'
+
+jobs:
+  commit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Setup Git
+        run: |
+          git config user.name "${{ github.actor }}"
+          git config user.email "${{ github.actor }}@users.noreply.github.com"
+
+      - name: Make commits
+        run: |
+          INTENSITY=${{ github.event.inputs.intensity || '4' }}
+          for i in $(seq 1 $INTENSITY); do
+            echo "$(date '+%Y-%m-%d %H:%M:%S') - auto commit #$i" >> contributions.txt
+            git add contributions.txt
+            git commit -m "auto: $(date '+%Y-%m-%d') commit #$i"
+            sleep 2
+          done
+
+      - name: Push
+        run: git push origin main
